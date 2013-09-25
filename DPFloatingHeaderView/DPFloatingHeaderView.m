@@ -6,10 +6,7 @@
 //  Copyright (c) 2013 DuneParkSoftware, LLC. All rights reserved.
 //
 
-#import <objc/message.h>
 #import "DPFloatingHeaderView.h"
-
-static char DPFloatingHeaderInstanceKey;
 
 typedef NS_ENUM(NSInteger, DPFloatingHeaderViewAnimationMode) {
     DPFloatingHeaderViewAnimationModeSlide,
@@ -20,6 +17,7 @@ static NSTimeInterval const kAnimationDuration = 0.2;
 static NSTimeInterval const kAnimationDelay = 0.1;
 
 @interface DPFloatingHeaderView () <UIScrollViewDelegate>
+@property (weak, nonatomic) id scrollViewDelegate;
 @property (assign, nonatomic) CGFloat minimumHeight, maximumHeight, maximumToolbarHeight;
 @property (assign, nonatomic) UIEdgeInsets originalContentInsets, originalScrollIndicatorInsets;
 @property (assign, nonatomic) CGFloat initialContentOffsetY, lastContentOffsetY;
@@ -69,9 +67,9 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 }
 
 - (void)initSelf {
-    __weak DPFloatingHeaderView *weakSelf = self;
+    __weak typeof(self) weakSelf = self;
     orientationChangeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIDeviceOrientationDidChangeNotification object:[UIDevice currentDevice] queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        __strong DPFloatingHeaderView *strongSelf = weakSelf;
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
         // If the scroll view's content height is less than its frame height, then expand.
         if (strongSelf.scrollView.contentSize.height <= strongSelf.scrollView.frame.size.height - strongSelf.minimumHeight) {
             [strongSelf expand];
@@ -106,9 +104,6 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 - (void)attachToScrollView {
     if (!self.scrollView) return;
 
-    // Set a weak pointer to reference ourself.
-    objc_setAssociatedObject(self.scrollView, &DPFloatingHeaderInstanceKey, self, OBJC_ASSOCIATION_ASSIGN);
-
     // Capture the current value of the height constraint constant. This becomes our view's maximum height.
     [self setMaximumHeight:[self.heightConstraint constant]];
 
@@ -123,9 +118,6 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 
 - (void)detachFromScrollView {
     if (!self.scrollView) return;
-
-    // Remove weak pointer reference to ourself.
-    objc_setAssociatedObject(self.scrollView, &DPFloatingHeaderInstanceKey, nil, OBJC_ASSOCIATION_ASSIGN);
 
     [self restoreScrollViewInsets];
 }
@@ -175,204 +167,92 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 #pragma mark - Scroll view delegate integration
 
 - (void)configureScrollViewDelegate {
-    if (![self.scrollView delegate]) {
-        [self.scrollView setDelegate:self];
-    }
-    else {
-        [self attachToScrollViewDelegate:self.scrollView.delegate];
+    [self setScrollViewDelegate:nil];
 
-        // Reassign the delegate. This is needed because the scroll may view cache responses to respondsToSelector: calls
-        // for certain delegate methods. Since we've injected methods into the existing delegate, some of the cached
-        // responses may need to be updated.
-        id delegate = self.scrollView.delegate;
-        [self.scrollView setDelegate:nil];
-        [self.scrollView setDelegate:delegate];
-    }
-}
-
-- (void)attachToScrollViewDelegate:(id <UIScrollViewDelegate>)delegate {
-    [self attachToScrollViewDelegate:delegate forSelector:@selector(scrollViewShouldScrollToTop:)];
-    [self attachToScrollViewDelegate:delegate forSelector:@selector(scrollViewDidScroll:)];
-    [self attachToScrollViewDelegate:delegate forSelector:@selector(scrollViewWillBeginDragging:)];
-    [self attachToScrollViewDelegate:delegate forSelector:@selector(scrollViewWillEndDragging:withVelocity:targetContentOffset:)];
-    [self attachToScrollViewDelegate:delegate forSelector:@selector(scrollViewDidEndDragging:willDecelerate:)];
-}
-
-- (void)attachToScrollViewDelegate:(id <UIScrollViewDelegate>)delegate forSelector:(SEL)selector {
-    // If the delegate responds to the standard UIScrollView method already, then we inject our own responder method
-    // into the instance, switch its method implementation with the existing method, and finally call the original
-    // method from our injected method.
-    // Otherwise, we simply inject our own method.
-    if ([delegate respondsToSelector:selector]) {
-        SEL injectSEL = NSSelectorFromString([NSString stringWithFormat:@"_DPFloatingHeaderView_injected_%@", NSStringFromSelector(selector)]);
-        // Make sure the delegate does not already contain the method we're going to inject.
-        if ([delegate respondsToSelector:injectSEL]) {[NSException raise:NSInternalInconsistencyException format:@"The scroll view delegate has already been attached to a header controller."];}
-        [self injectInstanceSelector:injectSEL fromClass:[self class] toClass:[delegate class]];
-        [self exchangeInstanceSelector:selector andSelector:injectSEL forClass:[delegate class]];
-    }
-    else {
-        [self injectInstanceSelector:selector fromClass:[self class] toClass:[delegate class]];
-    }
-}
-
-- (void)injectInstanceSelector:(SEL)selector fromClass:(Class)fromClass toClass:(Class)toClass {
-    IMP imp = class_getMethodImplementation(fromClass, selector);
-    const char *types = method_getTypeEncoding(class_getInstanceMethod(fromClass, selector));
-    if (!class_addMethod(toClass, selector, imp, types)) {[NSException raise:NSInternalInconsistencyException format:@"Failed to inject method into scroll view delegate class."];}
-}
-
-- (void)exchangeInstanceSelector:(SEL)selector andSelector:(SEL)otherSelector forClass:(Class)class {
-    Method fromMethod = class_getInstanceMethod(class, selector),
-    toMethod = class_getInstanceMethod(class, otherSelector);
-    method_exchangeImplementations(fromMethod, toMethod);
-}
-
-#pragma mark - Externally-injected view delegate methods
-
-- (BOOL)_DPFloatingHeaderView_injected_scrollViewShouldScrollToTop:(UIScrollView *)scrollView {
-    // "self" in this method refers to the scroll view's original delegate instance, since this method was injected.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with a scroll view."];
-
-    // Call the original delegate's method first for this method to get its return value. (This looks recursive, but it is not!)
-    // Note: We're not using one of the objc_msgSend variants here because, well, I can't get any of them to work with a method that returns a primitive BOOL.
-    BOOL retVal = [self _DPFloatingHeaderView_injected_scrollViewShouldScrollToTop:scrollView];
-
-    // Call the header view's delegate method, unless the original delegate returned NO.
-    if (retVal) {
-        [headerView scrollViewShouldScrollToTop:scrollView];
+    // If the scroll view already has a delegate, keep a pointer to it and forward messages to it.
+    if ([self.scrollView delegate]) {
+        [self setScrollViewDelegate:self.scrollView.delegate];
     }
 
-    // Return the original delegate's result.
-    return retVal;
-}
-
-- (void)_DPFloatingHeaderView_injected_scrollViewWillBeginDragging:(UIScrollView *)scrollView {
-    // "self" in this method refers to the scroll view's original delegate instance, since this method was injected.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with a scroll view."];
-
-    // Call the header view's delegate method.
-    objc_msgSend(headerView, @selector(scrollViewWillBeginDragging:), scrollView);
-
-    // Call the original delegate's method. (This looks recursive, but it is not!)
-    objc_msgSend(self, @selector(_DPFloatingHeaderView_injected_scrollViewWillBeginDragging:), scrollView);
-}
-
-- (void)_DPFloatingHeaderView_injected_scrollViewDidScroll:(UIScrollView *)scrollView {
-    // "self" in this method refers to the scroll view's original delegate instance, since this method was injected.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with a scroll view."];
-
-    // Call the header view's delegate method.
-    objc_msgSend(headerView, @selector(scrollViewDidScroll:), scrollView);
-
-    // Call the original delegate's method. (This looks recursive, but it is not!)
-    objc_msgSend(self, @selector(_DPFloatingHeaderView_injected_scrollViewDidScroll:), scrollView);
-}
-
-- (void)_DPFloatingHeaderView_injected_scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    // "self" in this method refers to the scroll view's original delegate instance, since this method was injected.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with a scroll view."];
-
-    // Call the header view's delegate method.
-    objc_msgSend(headerView, @selector(scrollViewDidEndDragging:willDecelerate:), scrollView, decelerate);
-
-    // Call the original delegate's method. (This looks recursive, but it is not!)
-    objc_msgSend(self, @selector(_DPFloatingHeaderView_injected_scrollViewDidEndDragging:willDecelerate:), scrollView, decelerate);
-}
-
-- (void)_DPFloatingHeaderView_injected_scrollViewWillEndDragging:(UIScrollView *)scrollView withVelocity:(CGPoint)velocity targetContentOffset:(inout CGPoint *)targetContentOffset {
-    // "self" in this method refers to the scroll view's original delegate instance, since this method was injected.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with a scroll view."];
-
-    // Call the original delegate's method first for this method, since it has an alterable inout arg. (This looks recursive, but it is not!)
-    objc_msgSend(self, @selector(_DPFloatingHeaderView_injected_scrollViewWillEndDragging:withVelocity:targetContentOffset:), scrollView, velocity, targetContentOffset);
-
-    // Call the header view's delegate method.
-    objc_msgSend(headerView, @selector(scrollViewWillEndDragging:withVelocity:targetContentOffset:), scrollView, velocity, targetContentOffset);
+    // Become the scroll view's delegate.
+    [self.scrollView setDelegate:self];
 }
 
 #pragma mark - Internal scroll view delegate methods
 
 - (BOOL)scrollViewShouldScrollToTop:(UIScrollView *)scrollView {
-    // "self" in this method *may* refer to this header class, or the scroll view's original delegate instance, if this
-    // method was injected. Therefore, never rely on self! Use headerView instead.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with the scroll view."];
-
-    if ([headerView isCollapsed]) {
-        [headerView expand];
+    if ([self isCollapsed]) {
+        [self expand];
         return NO;
     }
+
+    if ([self.scrollViewDelegate respondsToSelector:@selector(scrollViewShouldScrollToTop:)]) {
+        return [self.scrollViewDelegate scrollViewShouldScrollToTop:scrollView];
+    }
+
     return YES;
 }
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
-    // "self" in this method *may* refer to this header class, or the scroll view's original delegate instance, if this
-    // method was injected. Therefore, never rely on self! Use headerView instead.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with the scroll view."];
+    if ([self.scrollViewDelegate respondsToSelector:@selector(scrollViewWillBeginDragging:)]) {
+        [self.scrollViewDelegate scrollViewWillBeginDragging:scrollView];
+    }
 
     if (!scrollView.isTracking) return;
 
     // Capture initial values for this scroll.
-    headerView.initialContentOffsetY = headerView.lastContentOffsetY = scrollView.contentOffset.y;
-    headerView.catchPointOffset = [headerView isCollapsed] ? 0 : headerView.maximumHeight + scrollView.contentOffset.y;
-    if (headerView.catchPointOffset < 0) headerView.catchPointOffset = 0;
-    headerView.ignoreScroll = NO;
+    self.initialContentOffsetY = self.lastContentOffsetY = scrollView.contentOffset.y;
+    self.catchPointOffset = [self isCollapsed] ? 0 : self.maximumHeight + scrollView.contentOffset.y;
+    if (self.catchPointOffset < 0) self.catchPointOffset = 0;
+    self.ignoreScroll = NO;
 
     // If the scroll view's content height is less than its frame height, then ignore scrolling.
-    if (scrollView.contentSize.height <= scrollView.frame.size.height - headerView.minimumHeight) {
-        headerView.ignoreScroll = YES;
+    if (scrollView.contentSize.height <= scrollView.frame.size.height - self.minimumHeight) {
+        self.ignoreScroll = YES;
         return;
     }
 
     // If the scroll content is dragged upward from the bottom, then expand the header and ignore the rest of this scroll.
-    headerView.didStartAtContentBottom = (scrollView.contentOffset.y + scrollView.frame.size.height >= scrollView.contentSize.height);
+    self.didStartAtContentBottom = (scrollView.contentOffset.y + scrollView.frame.size.height >= scrollView.contentSize.height);
     // We do not want the header to "jump" if the content is pulled upward from the bottom and the header is already fully expanded.
-    if (headerView.didStartAtContentBottom && [headerView isExpanded]) {
-        headerView.ignoreScroll = YES;
-        return;
+    if (self.didStartAtContentBottom && [self isExpanded]) {
+        self.ignoreScroll = YES;
     }
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    // "self" in this method *may* refer to this header class, or the scroll view's original delegate instance, if this
-    // method was injected. Therefore, never rely on self! Use headerView instead.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with the scroll view."];
+    if ([self.scrollViewDelegate respondsToSelector:@selector(scrollViewDidScroll:)]) {
+        [self.scrollViewDelegate scrollViewDidScroll:scrollView];
+    }
 
-    if (headerView.ignoreScroll) return;
+    if (self.ignoreScroll) return;
 
     // This method is called repeatedly while the scroll content offset changes.
 
     CGFloat y = scrollView.contentOffset.y;
-    CGFloat hdrMaxH = headerView.maximumHeight, hdrMinH = headerView.minimumHeight;
-    CGFloat cp = headerView.catchPointOffset;
+    CGFloat hdrMaxH = self.maximumHeight, hdrMinH = self.minimumHeight;
+    CGFloat cp =  self.catchPointOffset;
 
     // Always keep these state values updated.
-    CGFloat delta = headerView.lastContentOffsetY - scrollView.contentOffset.y;
-    headerView.lastContentOffsetY = scrollView.contentOffset.y;
-    headerView.scrollDirectionIsUp = (delta < 0);
+    CGFloat delta = self.lastContentOffsetY - scrollView.contentOffset.y;
+    self.lastContentOffsetY = scrollView.contentOffset.y;
+    self.scrollDirectionIsUp = (delta < 0);
 
     if (scrollView.isTracking) {
         // User is touching the scroll view.
 
         // If the scroll content is dragged upward from the bottom, then expand the header and ignore the rest of this scroll.
-        if (headerView.didStartAtContentBottom && headerView.scrollDirectionIsUp && ![headerView isExpanded]) {
-            headerView.ignoreScroll = YES;
-            [headerView expand];
+        if (self.didStartAtContentBottom && self.scrollDirectionIsUp && ![self isExpanded]) {
+            self.ignoreScroll = YES;
+            [self expand];
             return;
         }
 
         // The scroll content top is above the header. Make sure the header is fully collapsed.
         if (y - cp >= (0 - hdrMinH)) {
-            [headerView moveTo:hdrMinH];
+            [self moveTo:hdrMinH];
             // The header is fully collapsed. Reset the catchPointOffset to 0.
-            headerView.catchPointOffset = 0;
+            self.catchPointOffset = 0;
             return;
         }
 
@@ -380,33 +260,31 @@ static NSTimeInterval const kAnimationDelay = 0.1;
         if (y - cp < (0 - hdrMinH) && y - cp > -hdrMaxH) {
             // If the scroll content is being stretched upward from the bottom, then collapse the header.
             if (y + scrollView.frame.size.height > scrollView.contentSize.height) {
-                headerView.ignoreScroll = YES;
-                [headerView collapse];
+                self.ignoreScroll = YES;
+                [self collapse];
                 return;
             }
             CGFloat position = hdrMaxH - (hdrMaxH + y) + cp;
-            [headerView moveTo:position];
+            [self moveTo:position];
             return;
         }
 
         // The scroll content top is being pulled down below the header's maximum height. Make sure the header is fully expanded.
         if (y - cp <= -hdrMaxH) {
-            [headerView moveTo:hdrMaxH];
+            [self moveTo:hdrMaxH];
             // If the content top is below the catchPointOffset, then move the catchpoint down to the content's current top.
-            headerView.catchPointOffset = headerView.maximumHeight + scrollView.contentOffset.y;
-            if (headerView.catchPointOffset < 0) headerView.catchPointOffset = 0;
-            return;
+            self.catchPointOffset = self.maximumHeight + scrollView.contentOffset.y;
+            if (self.catchPointOffset < 0) self.catchPointOffset = 0;
         }
     }
 }
 
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView withVelocity:(CGPoint)velocity targetContentOffset:(inout CGPoint *)targetContentOffset {
-    // "self" in this method *may* refer to this header class, or the scroll view's original delegate instance, if this
-    // method was injected. Therefore, never rely on self! Use headerView instead.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with the scroll view."];
+    if ([self.scrollViewDelegate respondsToSelector:@selector(scrollViewWillEndDragging:withVelocity:targetContentOffset:)]) {
+        [self.scrollViewDelegate scrollViewWillEndDragging:scrollView withVelocity:velocity targetContentOffset:targetContentOffset];
+    }
 
-    if (headerView.ignoreScroll) return;
+    if (self.ignoreScroll) return;
 
     // This method is called when the user lifts their finger at the end of a drag. The velocity tells us if the content is still moving, and
     // which direction. The targetContentOffset tells us where the content will come to rest.
@@ -415,60 +293,81 @@ static NSTimeInterval const kAnimationDelay = 0.1;
     if (CGPointEqualToPoint(velocity, CGPointZero)) return;
 
     // Determine direction from velocity.
-    headerView.scrollDirectionIsUp = velocity.y > 0;
+    self.scrollDirectionIsUp = velocity.y > 0;
 
     CGFloat y = (*targetContentOffset).y;
-    CGFloat hdrMinH = headerView.minimumHeight;
+    CGFloat hdrMinH = self.minimumHeight;
 
     // If the scroll content will stop below the header's minimum height, then expand the header.
     if (y < (0 - hdrMinH)) {
-        headerView.ignoreScroll = YES;
-        [headerView expand];
+        self.ignoreScroll = YES;
+        [self expand];
         return;
     }
 
     // If the scroll content will stop above the header's minimum height...
     if (y >= (0 - hdrMinH)) {
         // If the scroll direction is up, then collapse the header.
-        if (headerView.scrollDirectionIsUp) {
-            headerView.ignoreScroll = YES;
-            [headerView collapse];
+        if (self.scrollDirectionIsUp) {
+            self.ignoreScroll = YES;
+            [self collapse];
             return;
         }
 
         // If the scroll direction is down, then expand the header.
-        if (!headerView.scrollDirectionIsUp) {
-            headerView.ignoreScroll = YES;
-            [headerView expand];
-            return;
+        if (!self.scrollDirectionIsUp) {
+            self.ignoreScroll = YES;
+            [self expand];
         }
     }
 }
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    // "self" in this method *may* refer to this header class, or the scroll view's original delegate instance, if this
-    // method was injected. Therefore, never rely on self! Use headerView instead.
-    DPFloatingHeaderView *headerView = objc_getAssociatedObject(scrollView, &DPFloatingHeaderInstanceKey);
-    if (!headerView) [NSException raise:NSInternalInconsistencyException format:@"The header view is not associated with the scroll view."];
+    if ([self.scrollViewDelegate respondsToSelector:@selector(scrollViewDidEndDragging:willDecelerate:)]) {
+        [self.scrollViewDelegate scrollViewDidEndDragging:scrollView willDecelerate:decelerate];
+    }
 
-    if (headerView.ignoreScroll) return;
+    if (self.ignoreScroll) return;
 
     // Deceleration is handled in another method.
     if (decelerate) return;
 
     CGFloat y = scrollView.contentOffset.y;
-    CGFloat hdrMinH = headerView.minimumHeight;
+    CGFloat hdrMinH = self.minimumHeight;
 
     // If the scroll content stopped below the header's minimum height, then expand the header.
     if (y < (0 - hdrMinH)) {
-        [headerView expand];
+        [self expand];
         return;
     }
 
     // If the header is not fully expanded, then collapse it.
-    if (![headerView isExpanded]) {
-        [headerView collapse];
-        return;
+    if (![self isExpanded]) {
+        [self collapse];
+    }
+}
+
+#pragma mark - Delegate message forwarding
+
+- (BOOL)respondsToSelector:(SEL)aSelector {
+    BOOL retVal = [super respondsToSelector:aSelector];
+    if (retVal) return retVal;
+
+    return [self.scrollViewDelegate respondsToSelector:aSelector];
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+    if ([self.scrollViewDelegate respondsToSelector:aSelector]) {
+        return [self.scrollViewDelegate methodSignatureForSelector:aSelector];
+    }
+    return [super methodSignatureForSelector:aSelector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)anInvocation {
+    if ([self.scrollViewDelegate respondsToSelector:[anInvocation selector]]) {
+        [anInvocation invokeWithTarget:self.scrollViewDelegate];
+    } else {
+        [super forwardInvocation:anInvocation];
     }
 }
 
@@ -483,12 +382,12 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 
     if ([self isExpanded]) return;
 
-    __weak DPFloatingHeaderView *weakSelf = self;
+    __weak typeof(self) weakSelf = self;
     [UIView animateWithDuration:kAnimationDuration
                           delay:kAnimationDelay
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-                         __strong DPFloatingHeaderView *strongSelf = weakSelf;
+                         __strong __typeof(weakSelf) strongSelf = weakSelf;
 
                          if (strongSelf.animationBlock) {
                              strongSelf.animationBlock(strongSelf, strongSelf.maximumHeight, kAnimationDuration);
@@ -509,12 +408,12 @@ static NSTimeInterval const kAnimationDelay = 0.1;
 
     if ([self isCollapsed]) return;
 
-    __weak DPFloatingHeaderView *weakSelf = self;
+    __weak typeof(self) weakSelf = self;
     [UIView animateWithDuration:kAnimationDuration
                           delay:kAnimationDelay
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
-                         __strong DPFloatingHeaderView *strongSelf = weakSelf;
+                         __strong __typeof(weakSelf) strongSelf = weakSelf;
 
                          if (strongSelf.animationBlock) {
                              strongSelf.animationBlock(strongSelf, strongSelf.minimumHeight, kAnimationDuration);

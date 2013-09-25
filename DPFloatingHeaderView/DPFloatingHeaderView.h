@@ -18,6 +18,7 @@ typedef void(^DPFloatingHeaderViewDidChangeHeightBlock)(__weak DPFloatingHeaderV
 @property (weak, nonatomic) IBOutlet UIScrollView *scrollView;
 @property (weak, nonatomic) IBOutlet UIView *toolbarView;
 
+@property (readonly, weak, nonatomic) id scrollViewDelegate;
 @property (readonly, assign, nonatomic) CGFloat minimumHeight, maximumHeight, maximumToolbarHeight;
 
 @property (copy, nonatomic) DPFloatingHeaderViewIsAnimatingBlock animationBlock;
